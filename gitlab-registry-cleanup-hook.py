@@ -13,6 +13,7 @@ from gricleaner import GitlabRegistryClient
 import logging
 import json
 import gitlab
+import re
 
 
 class JsonResponse(HTTPResponse):
@@ -108,7 +109,7 @@ def validate():
 
 
 def get_image_delete_list(project, data):
-    image_template = config.get('IMAGE_NAME_TEMPLATE', '%(project_path)s/branches:%(branch)s')
+    image_template = config.get('IMAGE_NAME_TEMPLATE', '%(project_path)s/%(branch)s')
     project_attribute = config.get('IMAGE_NAME_PROJECT_ATTRIBUTE')
     if project_attribute:
         try:
@@ -118,15 +119,20 @@ def get_image_delete_list(project, data):
             image_template = attribute.value
         except gitlab.exceptions.GitlabGetError:
             pass
+    # fix for CI_COMMIT_REF_SLUG for branche name https://gitlab.com/gitlab-org/gitlab-runner/-/blame/main/Makefile.build.mk#L64    
+    CI_COMMIT_REF_SLUG = data['object_attributes']['source_branch'].lower()
+    CI_COMMIT_REF_SLUG = CI_COMMIT_REF_SLUG[:63]
+    CI_COMMIT_REF_SLUG = re.sub('[^a-z0-9-]+', '-', CI_COMMIT_REF_SLUG)
+    CI_COMMIT_REF_SLUG = re.sub('^-*([a-z0-9-]+[a-z0-9])-*$', '\\1', CI_COMMIT_REF_SLUG)
 
     attributes = {
-        'branch': data['object_attributes']['source_branch'],
+        'branch': CI_COMMIT_REF_SLUG,
         'project_path': data['object_attributes']['source']['path_with_namespace'],
     }
 
     for template in image_template.split(','):
-        image, tag = (template % attributes).split(':')
-        yield image, tag
+        image = (template % attributes)
+        yield image
 
 
 def delete_image(image, tag):
@@ -149,20 +155,33 @@ def cleanup(project, data):
     messages = []
     status = 200
 
-    for image, tag in get_image_delete_list(project, data):
-        try:
-            message, code = delete_image(image, tag)
-            if code != 200:
-                status = code
-        except requests.exceptions.HTTPError as error:
-            logger.fatal(error)
-            message = 'Underlying HTTP error. Details not disclosed.'
-            status = code = 500
+    for image in get_image_delete_list(project, data):
+        tags = client.get_tags(image)
+        if "tags" not in tags:
+            messages.append({
+                'message': 'Tags not found'
+            })
+            return JsonResponse(messages, status=status)
+        if tags["tags"] is None:
+            messages.append({
+                'message': 'Tags not found'
+            })
+            return JsonResponse(messages, status=status)
 
-        messages.append({
-            'image': image, 'tag': tag,
-            'message': message, 'code': code,
-        })
+        for tag in tags["tags"]:
+            try:
+                message, code = delete_image(image, tag)
+                if code != 200:
+                    status = code
+            except requests.exceptions.HTTPError as error:
+                logger.fatal(error)
+                message = 'Underlying HTTP error. Details not disclosed.'
+                status = code = 500
+
+            messages.append({
+                'image': image, 'tag': tag,
+                'message': message, 'code': code,
+            })
 
     return JsonResponse(messages, status=status)
 
