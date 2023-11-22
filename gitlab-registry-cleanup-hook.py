@@ -105,6 +105,10 @@ def validate():
         logger.info("Registry not enabled; skip")
         return NoContentResponse
 
+    if project.default_branch == data['object_attributes']['source_branch']:
+        logger.info("Default branch can't by clean")
+        return NoContentResponse
+
     return cleanup(project, data)
 
 
